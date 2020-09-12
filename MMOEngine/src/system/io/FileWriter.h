@@ -15,6 +15,7 @@ namespace sys {
   namespace io {
 
   	class FileWriter : public Writer {
+	protected:
   		File* file;
 
   	public:
@@ -31,7 +32,7 @@ namespace sys {
   			FileWriter::file = file;
   		}
 
-  		void close() {
+  		void close() override {
   			validateWriteable();
 
   			//file->flush(); close already does flush internally
@@ -39,19 +40,19 @@ namespace sys {
   			file->close();
   		}
 
-  		void flush() {
+  		void flush() override {
   			validateWriteable();
 
   			file->flush();
   		}
 
-  		int write(const char* str, int len) {
+  		int write(const char* str, int len) override {
   			validateWriteable();
 
   			return fwrite(str, 1, len, file->getDescriptor());
   		}
 
-  		int write(const char* str, uint32 off, int len) {
+  		int write(const char* str, uint32 off, int len) override {
   			validateWriteable();
 
   			file->seek(off);

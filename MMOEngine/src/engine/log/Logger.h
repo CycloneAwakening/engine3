@@ -24,6 +24,7 @@
 
 #include "system/lang.h"
 #include "system/lang/Function.h"
+#include "system/thread/Mutex.h"
 
 namespace engine {
   namespace log {
@@ -160,7 +161,7 @@ namespace engine {
 		using LoggerCallback = Function<int(LogLevel level, const char* message)>;
 
 	private:
-		FileWriter* logFile = nullptr;
+		mutable Reference<FileLogWriter*> logFile = nullptr;
 
 		LogLevel logLevel = LOG;
 		bool doGlobalLog = true;
@@ -175,7 +176,10 @@ namespace engine {
 
 		UniqueReference<LoggerCallback*> callback;
 
-		static AtomicReference<FileWriter*> globalLogFile;
+		String rotatePrefix = "zArchive/"; // Default to {dir}/zArchive/{filename}
+		uint32 rotateLogSizeMB = 0;
+
+		static Reference<FileLogWriter*> globalLogFile;
 		static AtomicInteger globalLogLevel;
 		static AtomicBoolean syncGlobalLog;
 		static AtomicBoolean jsonGlobalLog;
@@ -193,14 +197,14 @@ namespace engine {
 		Logger& operator=(const Logger& logger);
 		Logger& operator=(Logger&& logger);
 
-		static void setGlobalFileLogger(const String& file);
+		static void setGlobalFileLogger(const String& file, uint32 rotateSizeMB = 100, bool rotateOnOpen = false);
 		static void setGlobalFileLogLevel(LogLevel level);
 		static void setGlobalFileLoggerSync(bool val);
 		static void setGlobalFileJson(bool val);
 
 		static void closeGlobalFileLogger();
 
-		void setFileLogger(const String& file, bool appendData = false);
+		void setFileLogger(const String& file, bool appendData = false, bool rotateOnOpen = false);
 
 		void closeFileLogger();
 
@@ -355,6 +359,36 @@ namespace engine {
 			logJSON = val;
 		}
 
+		inline void setLogSynchronized(bool synchronized) {
+			if (logFile == nullptr)
+				return;
+
+			logFile->setSynchronized(synchronized);
+		}
+
+		inline void setRotateLogSizeMB(uint32 maxSizeMB) {
+			rotateLogSizeMB = maxSizeMB;
+
+			if (logFile != nullptr) {
+				logFile->setRotateSizeMB(rotateLogSizeMB);
+			}
+		}
+
+		inline void setRotatePrefix(String prefix) {
+			rotatePrefix = prefix;
+
+			if (logFile != nullptr) {
+				logFile->setRotatePrefix(rotatePrefix);
+			}
+		}
+
+		inline void rotateLogFile() {
+			if (logFile == nullptr)
+				return;
+
+			logFile->rotatefile();
+		}
+
 		inline void setLoggerCallback(LoggerCallback&& funct) {
 			callback = new LoggerCallback(std::move(funct));
 		}
@@ -376,7 +410,7 @@ namespace engine {
 			return name;
 		}
 
-		inline FileWriter* getFileLogger() const {
+		inline FileLogWriter* getFileLogger() const {
 			return logFile;
 		}
 

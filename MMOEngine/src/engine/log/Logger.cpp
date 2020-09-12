@@ -4,8 +4,9 @@
 */
 
 #include "Logger.h"
+#include <atomic>
 
-AtomicReference<FileWriter*> Logger::globalLogFile = nullptr;
+Reference<FileLogWriter*> Logger::globalLogFile = nullptr;
 
 Time Logger::starttime;
 
@@ -29,7 +30,8 @@ Logger::Logger(const String& s, LogLevel level) : logLevel(level), name(s) {
 Logger::Logger(Logger&& logger) : logFile(logger.logFile), logLevel(logger.logLevel),
 	doGlobalLog(logger.doGlobalLog), doSyncLog(logger.doSyncLog), logTimeToFile(logger.logTimeToFile),
 	logLevelToFile(logger.logLevelToFile), name(std::move(logger.name)), logJSON(logger.logJSON),
-	logToConsole(logger.logToConsole), callback(std::move(logger.callback)) {
+	logToConsole(logger.logToConsole), callback(std::move(logger.callback)),
+	rotatePrefix(std::move(logger.rotatePrefix)), rotateLogSizeMB(logger.rotateLogSizeMB) {
 
 	logger.logFile = nullptr;
 }
@@ -37,7 +39,7 @@ Logger::Logger(Logger&& logger) : logFile(logger.logFile), logLevel(logger.logLe
 Logger::Logger(const Logger& logger) : logFile(nullptr), logLevel(logger.logLevel),
 	doGlobalLog(logger.doGlobalLog), doSyncLog(logger.doSyncLog), logTimeToFile(logger.logTimeToFile),
 	logLevelToFile(logger.logLevelToFile), name(logger.name), logJSON(logger.logJSON),
-	logToConsole(logger.logToConsole) {
+	logToConsole(logger.logToConsole), rotatePrefix(logger.rotatePrefix), rotateLogSizeMB(logger.rotateLogSizeMB) {
 
 	if (logger.callback != nullptr) {
 		callback = new LoggerCallback(*logger.callback.get());
@@ -54,18 +56,19 @@ Logger& Logger::operator=(const Logger& logger) {
 
 	closeFileLogger();
 
-	logFile = logger.logFile;
-       	logLevel = logger.logLevel;
+	logLevel = logger.logLevel;
 	doGlobalLog = logger.doGlobalLog;
-       	doSyncLog = logger.doSyncLog;
-       	logTimeToFile = logger.logTimeToFile;
+	doSyncLog = logger.doSyncLog;
+	logTimeToFile = logger.logTimeToFile;
 	logLevelToFile = logger.logLevelToFile;
-       	name = logger.name;
+	name = logger.name;
 	logJSON = logger.logJSON;
 	logToConsole = logger.logToConsole;
+	rotatePrefix = logger.rotatePrefix;
+	rotateLogSizeMB = logger.rotateLogSizeMB;
 
 	if (logger.callback != nullptr) {
-	       	callback = new LoggerCallback(*logger.callback.get());
+		callback = new LoggerCallback(*logger.callback.get());
 	} else {
 		callback = nullptr;
 	}
@@ -84,15 +87,17 @@ Logger& Logger::operator=(Logger&& logger) {
 	closeFileLogger();
 
 	logFile = logger.logFile;
-       	logLevel = logger.logLevel;
+	logLevel = logger.logLevel;
 	doGlobalLog = logger.doGlobalLog;
-       	doSyncLog = logger.doSyncLog;
-       	logTimeToFile = logger.logTimeToFile;
+	doSyncLog = logger.doSyncLog;
+	logTimeToFile = logger.logTimeToFile;
 	logLevelToFile = logger.logLevelToFile;
-       	name = std::move(logger.name);
+	name = std::move(logger.name);
 	logJSON = logger.logJSON;
 	logToConsole = logger.logToConsole;
-       	callback = std::move(logger.callback);
+	callback = std::move(logger.callback);
+	rotatePrefix = std::move(logger.rotatePrefix);
+	rotateLogSizeMB = logger.rotateLogSizeMB;
 
 	logger.logFile = nullptr;
 
@@ -103,11 +108,14 @@ Logger::~Logger() {
 	closeFileLogger();
 }
 
-void Logger::setGlobalFileLogger(const String& file) {
+void Logger::setGlobalFileLogger(const String& file, uint32 rotateSizeMB, bool rotateOnOpen) {
 	if (globalLogFile != nullptr)
 		closeGlobalFileLogger();
 
-	globalLogFile = new FileWriter(new File(file), true);
+	globalLogFile = FileLogWriter::getWriter(file, true, rotateOnOpen);
+
+	globalLogFile->setSynchronized(false);
+	globalLogFile->setRotateSizeMB(rotateSizeMB);
 
 	starttime.updateToCurrentTime();
 }
@@ -124,36 +132,37 @@ void Logger::setGlobalFileJson(bool val) {
 	jsonGlobalLog = val;
 }
 
-void Logger::setFileLogger(const String& file, bool appendData) {
+void Logger::setFileLogger(const String& file, bool appendData, bool rotateOnOpen) {
 	if (logFile != nullptr)
 		closeFileLogger();
 
-	File* fileObject = new File(file);
+	auto obj = FileLogWriter::getWriter(file, appendData, rotateOnOpen);
 
-	logFile = new FileWriter(fileObject, appendData);
+	if (obj != nullptr) {
+		obj->setRotatePrefix(rotatePrefix);
+		obj->setRotateSizeMB(rotateLogSizeMB);
+	}
+
+	logFile = obj;
 }
 
 void Logger::closeGlobalFileLogger() {
-	auto globalLogFile = Logger::globalLogFile.get();
+	auto globalLogFile = Logger::globalLogFile;
 
 	bool success = Logger::globalLogFile.compareAndSet(globalLogFile, nullptr);
 
 	if (success && globalLogFile != nullptr) {
 		globalLogFile->close();
-
-		delete globalLogFile->getFile();
-		delete globalLogFile;
 	}
 }
 
 void Logger::closeFileLogger() {
-	if (logFile != nullptr) {
-		logFile->close();
+	auto oldLogFile = logFile;
 
-		delete logFile->getFile();
+	bool success = logFile.compareAndSet(oldLogFile, nullptr);
 
-		delete logFile;
-		logFile = nullptr;
+	if (success && oldLogFile != nullptr) {
+		oldLogFile->close();
 	}
 }
 
@@ -211,12 +220,13 @@ void Logger::log(const char *msg, LogLevel type, bool forceSync) const {
 		return;
 	}
 
+	auto logFile = this->logFile.get();
+	auto globalLogFile = this->globalLogFile.get();
+
 	if (logFile == nullptr && globalLogFile == nullptr)
 		return;
 
 	if (logLevel >= type && logFile != nullptr) {
-		FileWriter* logFile = const_cast<FileWriter*>(this->logFile);
-
 		StringBuffer fullMessage;
 
 		if (!logJSON) {
@@ -241,8 +251,6 @@ void Logger::log(const char *msg, LogLevel type, bool forceSync) const {
 			logFile->flush();
 		}
 	} else if (doGlobalLog && globalLogFile != nullptr && globalLogLevel >= type) {
-		FileWriter* globalLogFile = const_cast<FileWriter*>(this->globalLogFile.get());
-
 		StringBuffer fullMessage;
 
 		if (!jsonGlobalLog) {
@@ -595,4 +603,3 @@ void LoggerHelper::flush(bool clearBuffer) {
 		buffer.deleteAll();
 	}
 }
-
